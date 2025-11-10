@@ -1,0 +1,101 @@
+pipeline {
+    agent any
+    tools {
+        maven "mymaven"
+    }
+    stages {
+        stage('cleanws') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('code') {
+            steps {
+                git "https://github.com/i-am-maheshpasupuleti/dockerwebapp.git"
+            }
+        }
+        stage('CQA') {
+            steps {
+                withSonarQubeEnv('mysonar') {
+                    sh "mvn clean verify sonar:sonar -Dsonar.projectKey=myproject"
+                }
+            }
+        }
+        stage('Qualitygates') {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-creds'
+                }
+            }
+        }
+        stage('codebuild') {
+            steps {
+                sh 'mvn clean package'
+                sh 'cp -r target Docker-app'
+            }
+        }
+        stage('owasp') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', nvdCredentialsId: 'owaspcreds', odcInstallation: 'owasp'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage('artifact') {
+            steps {
+                s3Upload consoleLogLevel: 'INFO', dontSetBuildResultOnFailure: false, dontWaitForConcurrentBuildCompletion: false, entries: [[bucket: 'maheshpasupuleti', excludedFile: '', flatten: false, gzipFiles: false, keepForever: false, managedArtifacts: false, noUploadOnFailure: true, selectedRegion: 'ap-south-1', showDirectlyInBrowser: false, sourceFile: 'target/vprofile-v2.war', storageClass: 'STANDARD', uploadFromSlave: false, useServerSideEncryption: false]], pluginFailureResultConstraint: 'FAILURE', profileName: 'mybucket', userMetadata: []
+            }
+        }
+        stage('imagebuild') {
+            steps {
+                sh 'docker build -t appimage Docker-app'
+                sh 'docker build -t dbimage Docker-db'
+            }
+        }
+        stage('trivy') {
+            steps {
+                sh 'trivy image appimage'
+                sh 'trivy image dbimage'
+            }
+        }
+        stage('imageupload') {
+            steps {
+                withDockerRegistry(credentialsId: 'docker-creds') {
+                     sh 'docker tag appimage mahesh6bot/socialmedia:app'
+                     sh 'docker tag dbimage mahesh6bot/socialmedia:db'
+                     sh 'docker push mahesh6bot/socialmedia:app'
+                     sh 'docker push mahesh6bot/socialmedia:db'
+                }
+            }
+        }
+    }
+}
+
+---
+//deploy CD file
+
+pipeline {
+    agent any
+
+    stages {
+        stage('Hello') {
+            steps {
+                git 'https://github.com/i-am-maheshpasupuleti/dockerwebapp.git'
+            }
+        }
+        stage('deploy') {
+            steps {
+                withKubeCredentials(kubectlCredentials: [[caCertificate: '', clusterName: 'EKS_CLOUD', contextName: '', credentialsId: 'k8s-creds', namespace: 'webapps', serverUrl: 'https://27F84ECD072EB0A1F2CE2E74A6D1CD84.yl4.ap-south-1.eks.amazonaws.com']]) {
+                  sh 'kubectl apply -f manifests'
+                }
+            }
+        }
+        stage('output') {
+            steps {
+                withKubeCredentials(kubectlCredentials: [[caCertificate: '', clusterName: 'EKS_CLOUD', contextName: '', credentialsId: 'k8s-creds', namespace: 'webapps', serverUrl: 'https://27F84ECD072EB0A1F2CE2E74A6D1CD84.yl4.ap-south-1.eks.amazonaws.com']]) {
+                       sh 'kubectl get all -n webapps'
+                    }
+            }
+        }
+    }
+}
+
